@@ -87,28 +87,49 @@ export function registerSaleHandlers(): void {
     if (!input.items || input.items.length === 0) {
       throw new Error('Sale must include at least one item')
     }
+    const discount = Number(input.discount) || 0
+    const paid = Number(input.paid) || 0
+    if (discount < 0) throw new Error('Discount must be non-negative')
+    if (paid < 0) throw new Error('Paid amount must be non-negative')
+    for (const item of input.items) {
+      if (!Number.isInteger(item.quantity) || item.quantity <= 0) {
+        throw new Error('Quantity must be a positive integer')
+      }
+      if (!Number.isFinite(item.unitPrice) || item.unitPrice < 0) {
+        throw new Error('Unit price must be non-negative')
+      }
+    }
+
+    const totalByMedicine = new Map<number, number>()
+    for (const item of input.items) {
+      totalByMedicine.set(
+        item.medicineId,
+        (totalByMedicine.get(item.medicineId) || 0) + item.quantity
+      )
+    }
+
     const db = getDb()
 
     const tx = db.transaction((payload: CreateSaleInput): number => {
-      let total = 0
-      for (const item of payload.items) {
-        if (item.quantity <= 0) throw new Error('Quantity must be positive')
+      for (const [medicineId, totalQty] of totalByMedicine) {
         const med = db
           .prepare('SELECT id, name, stock FROM medicines WHERE id = ?')
-          .get(item.medicineId) as { id: number; name: string; stock: number } | undefined
-        if (!med) throw new Error(`Medicine ${item.medicineId} not found`)
-        if (med.stock < item.quantity) {
+          .get(medicineId) as { id: number; name: string; stock: number } | undefined
+        if (!med) throw new Error(`Medicine ${medicineId} not found`)
+        if (med.stock < totalQty) {
           throw new Error(`Insufficient stock for ${med.name}`)
         }
-        total += item.quantity * item.unitPrice
       }
-      const grandTotal = Math.max(0, total - (payload.discount || 0))
+
+      const subtotal = payload.items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)
+      const effectiveDiscount = Math.min(discount, subtotal)
+      const grandTotal = subtotal - effectiveDiscount
       const info = db
         .prepare(
           `INSERT INTO sales (customer_id, user_id, total, discount, paid)
            VALUES (?, ?, ?, ?, ?)`
         )
-        .run(payload.customerId, user.id, grandTotal, payload.discount || 0, payload.paid || 0)
+        .run(payload.customerId, user.id, grandTotal, effectiveDiscount, paid)
       const saleId = info.lastInsertRowid as number
 
       const insertItem = db.prepare(
